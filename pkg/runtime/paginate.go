@@ -32,9 +32,6 @@ func PaginateAll(ctx context.Context, hostname, method, basePath string, body an
 		}
 
 		items := extractItemsRaw(data, listPath)
-		if len(items) == 0 {
-			break
-		}
 		allItems = append(allItems, items...)
 
 		switch hint.Strategy {
@@ -58,6 +55,9 @@ func PaginateAll(ctx context.Context, hostname, method, basePath string, body an
 			}
 			body = nextBody
 		case "offset":
+			if len(items) == 0 {
+				goto done
+			}
 			offset += len(items)
 			currentPath = setQueryParam(basePath, hint.TokenParam, strconv.Itoa(offset))
 		default:

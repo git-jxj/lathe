@@ -519,6 +519,8 @@ pages and `--max-pages` to cap the number of requests. With offset pagination,
 `--all` starts at the offset sent in the first request, including an explicit
 flag or a declared default. Each subsequent offset advances by the number of
 items returned, and an empty page ends collection.
+Cursor pagination follows continuation metadata even when a page contains no
+items.
 
 ### Long-Running Operations
 
