@@ -520,6 +520,13 @@ pages and `--max-pages` to cap the number of requests. With offset pagination,
 flag or a declared default. Each subsequent offset advances by the number of
 items returned, and an empty page ends collection.
 
+### Long-Running Operations
+
+Generated mutation commands expose `--wait` to follow a `202 Accepted`
+response's `Location` until polling returns another successful status. Polling
+has a five-minute total timeout, including HTTP requests and backoff waits.
+Canceling the command also cancels an in-flight polling request.
+
 ### Stream Collection
 
 ```yaml

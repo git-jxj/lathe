@@ -3,6 +3,8 @@ package runtime
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -159,6 +161,85 @@ func TestPollUntilDone_Timeout(t *testing.T) {
 	if got := ClassifyError(err).Code; got != CodeAPIError {
 		t.Fatalf("error code = %q, want %q", got, CodeAPIError)
 	}
+}
+
+func TestPollUntilDone_TimeoutBoundsRequestAndBackoff(t *testing.T) {
+	for _, waiting := range []string{"request", "backoff"} {
+		t.Run(waiting, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if waiting == "request" {
+					<-r.Context().Done()
+					return
+				}
+				w.WriteHeader(http.StatusAccepted)
+			}))
+			defer srv.Close()
+
+			// The caller deadline is a watchdog, not the polling budget. A poll
+			// timeout must win even while the request or initial backoff waits.
+			ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+			defer cancel()
+			_, err := PollUntilDone(ctx, srv.URL, "/status", ClientOptions{Timeout: 5 * time.Second}, 50*time.Millisecond)
+			if err == nil || err.Error() != "polling timed out after 50ms" {
+				t.Fatalf("PollUntilDone error = %v, want polling timeout", err)
+			}
+			if got := ClassifyError(err).Code; got != CodeAPIError {
+				t.Fatalf("error code = %q, want %q", got, CodeAPIError)
+			}
+			if ctx.Err() != nil {
+				t.Fatalf("caller deadline expired before polling returned: %v", ctx.Err())
+			}
+		})
+	}
+}
+
+func TestPollUntilDone_ContextCancelDuringRequest(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cancel()
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+
+	_, err := PollUntilDone(ctx, srv.URL, "/status", ClientOptions{Timeout: 5 * time.Second}, time.Minute)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("PollUntilDone error = %v, want context cancellation", err)
+	}
+}
+
+func TestPollUntilDone_ContextCancelCauseDuringBackoff(t *testing.T) {
+	ctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer srv.Close()
+
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	defer transport.CloseIdleConnections()
+	opts := ClientOptions{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		resp, err := transport.RoundTrip(req)
+		if err == nil {
+			resp.Body = pollCancelBody{ReadCloser: resp.Body, cancel: func() { cancel(errors.New("custom cancellation cause")) }}
+		}
+		return resp, err
+	})}
+	_, err := PollUntilDone(ctx, srv.URL, "/status", opts, time.Minute)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("PollUntilDone error = %v, want context cancellation", err)
+	}
+}
+
+type pollCancelBody struct {
+	io.ReadCloser
+	cancel func()
+}
+
+func (b pollCancelBody) Close() error {
+	err := b.ReadCloser.Close()
+	b.cancel()
+	return err
 }
 
 func TestPollUntilDone_ContextCancel(t *testing.T) {

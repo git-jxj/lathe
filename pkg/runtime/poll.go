@@ -15,9 +15,19 @@ const (
 	pollMaxBackoff     = 30 * time.Second
 )
 
+// PollUntilDone polls until a response is no longer accepted. The timeout bounds
+// both requests and backoff waits; nonpositive values use DefaultPollTimeout.
 func PollUntilDone(ctx context.Context, hostname, location string, opts ClientOptions, timeout time.Duration) ([]byte, error) {
 	if timeout <= 0 {
 		timeout = DefaultPollTimeout
+	}
+	pollCtx, cancel := context.WithTimeoutCause(ctx, timeout, newAPIError(fmt.Errorf("polling timed out after %s", timeout), 0))
+	defer cancel()
+	pollError := func() error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return context.Cause(pollCtx)
 	}
 	base, err := BaseURL(hostname)
 	if err != nil {
@@ -46,12 +56,11 @@ func PollUntilDone(ctx context.Context, hostname, location string, opts ClientOp
 		}
 		return nil
 	}
-	deadline := time.Now().Add(timeout)
 	backoff := pollInitBackoff
 
 	for {
-		if time.Now().After(deadline) {
-			return nil, newAPIError(fmt.Errorf("polling timed out after %s", timeout), 0)
+		if pollCtx.Err() != nil {
+			return nil, pollError()
 		}
 
 		loc, err := url.Parse(location)
@@ -63,8 +72,11 @@ func PollUntilDone(ctx context.Context, hostname, location string, opts ClientOp
 			return nil, newAPIError(fmt.Errorf("cross-host polling location %q", redactDebugURLString(location, opts.sensitiveQueryParams)), 0)
 		}
 		location = resolved.RequestURI()
-		r, err := DoRawFull(ctx, hostname, "GET", location, nil, opts)
+		r, err := DoRawFull(pollCtx, hostname, "GET", location, nil, opts)
 		if err != nil {
+			if ctx.Err() == nil && pollCtx.Err() != nil {
+				return nil, context.Cause(pollCtx)
+			}
 			return nil, err
 		}
 
@@ -77,8 +89,8 @@ func PollUntilDone(ctx context.Context, hostname, location string, opts ClientOp
 		}
 
 		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
+		case <-pollCtx.Done():
+			return nil, pollError()
 		case <-time.After(backoff):
 		}
 
